@@ -1,0 +1,222 @@
+import os
+import numpy as np
+import torch
+import open_clip
+
+from PIL import Image
+
+print("Loading RemoteCLIP...")
+
+# =========================
+# MODEL
+# =========================
+
+model, _, preprocess = open_clip.create_model_and_transforms(
+    "ViT-B-32",
+    pretrained="laion2b_s34b_b79k"
+)
+
+device = (
+    "mps"
+    if torch.backends.mps.is_available()
+    else "cpu"
+)
+
+model = model.to(device)
+model.eval()
+
+print("RemoteCLIP Ready!")
+
+# =========================
+# DATASET PATHS
+# =========================
+
+rgb_folder = "dataset/RGB_Gallery"
+sar_folder = "dataset/SAR_Gallery"
+
+# =========================
+# LOAD IMAGE FILENAMES
+# =========================
+
+rgb_files = sorted([
+    f for f in os.listdir(rgb_folder)
+    if f.lower().endswith(
+        (".png", ".jpg", ".jpeg")
+    )
+])
+
+sar_files = sorted([
+    f for f in os.listdir(sar_folder)
+    if f.lower().endswith(
+        (".png", ".jpg", ".jpeg")
+    )
+])
+
+# Only paired images
+
+common_files = sorted(
+    list(
+        set(rgb_files).intersection(
+            set(sar_files)
+        )
+    )
+)
+
+print(
+    f"Total Paired Images: {len(common_files)}"
+)
+
+# =========================
+# EMBEDDING STORAGE
+# =========================
+
+rgb_embeddings = []
+sar_embeddings = []
+
+rgb_paths = []
+sar_paths = []
+
+# =========================
+# EXTRACT EMBEDDINGS
+# =========================
+
+for i, filename in enumerate(common_files):
+
+    try:
+
+        rgb_path = os.path.join(
+            rgb_folder,
+            filename
+        )
+
+        sar_path = os.path.join(
+            sar_folder,
+            filename
+        )
+
+        rgb_img = Image.open(
+            rgb_path
+        ).convert("RGB")
+
+        sar_img = Image.open(
+            sar_path
+        ).convert("RGB")
+
+        rgb_tensor = preprocess(
+            rgb_img
+        ).unsqueeze(0).to(device)
+
+        sar_tensor = preprocess(
+            sar_img
+        ).unsqueeze(0).to(device)
+
+        with torch.no_grad():
+
+            rgb_feat = model.encode_image(
+                rgb_tensor
+            )
+
+            sar_feat = model.encode_image(
+                sar_tensor
+            )
+
+        rgb_feat = (
+            rgb_feat
+            .cpu()
+            .numpy()[0]
+            .astype(np.float32)
+        )
+
+        sar_feat = (
+            sar_feat
+            .cpu()
+            .numpy()[0]
+            .astype(np.float32)
+        )
+
+        rgb_embeddings.append(
+            rgb_feat
+        )
+
+        sar_embeddings.append(
+            sar_feat
+        )
+
+        rgb_paths.append(
+            rgb_path
+        )
+
+        sar_paths.append(
+            sar_path
+        )
+
+        if (i + 1) % 100 == 0:
+
+            print(
+                f"Processed {i+1}/{len(common_files)}"
+            )
+
+    except Exception as e:
+
+        print(
+            f"Skipping {filename}: {e}"
+        )
+
+# =========================
+# CONVERT TO NUMPY
+# =========================
+
+rgb_embeddings = np.array(
+    rgb_embeddings,
+    dtype=np.float32
+)
+
+sar_embeddings = np.array(
+    sar_embeddings,
+    dtype=np.float32
+)
+
+# =========================
+# SAVE
+# =========================
+
+os.makedirs(
+    "remoteclip_test",
+    exist_ok=True
+)
+
+np.save(
+    "remoteclip_test/rgb_embeddings.npy",
+    rgb_embeddings
+)
+
+np.save(
+    "remoteclip_test/sar_embeddings.npy",
+    sar_embeddings
+)
+
+np.save(
+    "remoteclip_test/rgb_paths.npy",
+    np.array(rgb_paths)
+)
+
+np.save(
+    "remoteclip_test/sar_paths.npy",
+    np.array(sar_paths)
+)
+
+# =========================
+# FINAL REPORT
+# =========================
+
+print("\nDone!")
+
+print(
+    "RGB Shape:",
+    rgb_embeddings.shape
+)
+
+print(
+    "SAR Shape:",
+    sar_embeddings.shape
+)
