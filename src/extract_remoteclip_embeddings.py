@@ -28,46 +28,103 @@ model.eval()
 print("RemoteCLIP Ready!")
 
 # =========================
-# DATASET PATHS
+# FIND ALL REGIONS
 # =========================
 
-rgb_folder = "dataset/RGB_Gallery"
-sar_folder = "dataset/SAR_Gallery"
+dataset_root = "dataset"
 
-# =========================
-# LOAD IMAGE FILENAMES
-# =========================
+rgb_paths_dict = {}
+sar_paths_dict = {}
 
-rgb_files = sorted([
-    f for f in os.listdir(rgb_folder)
-    if f.lower().endswith(
-        (".png", ".jpg", ".jpeg")
-    )
+regions = sorted([
+    d for d in os.listdir(dataset_root)
+    if d.startswith("r_")
 ])
 
-sar_files = sorted([
-    f for f in os.listdir(sar_folder)
-    if f.lower().endswith(
-        (".png", ".jpg", ".jpeg")
+print(f"Found {len(regions)} regions")
+
+for region in regions:
+
+    region_path = os.path.join(
+        dataset_root,
+        region
     )
-])
 
-# Only paired images
+    region_num = region.split("_")[1]
 
-common_files = sorted(
-    list(
-        set(rgb_files).intersection(
-            set(sar_files)
+    sar_folder = os.path.join(
+        region_path,
+        f"s1_{region_num}"
+    )
+
+    rgb_folder = os.path.join(
+        region_path,
+        f"s2_{region_num}"
+    )
+
+    if (
+        not os.path.exists(sar_folder)
+        or
+        not os.path.exists(rgb_folder)
+    ):
+        continue
+
+    rgb_files = sorted([
+        f for f in os.listdir(rgb_folder)
+        if f.lower().endswith(
+            (".png", ".jpg", ".jpeg")
+        )
+    ])
+
+    sar_files = sorted([
+        f for f in os.listdir(sar_folder)
+        if f.lower().endswith(
+            (".png", ".jpg", ".jpeg")
+        )
+    ])
+
+    common = sorted(
+        list(
+            set(rgb_files).intersection(
+                set(sar_files)
+            )
         )
     )
+
+    print(
+        f"{region} -> {len(common)} pairs"
+    )
+
+    for fname in common:
+
+        unique_name = (
+            f"{region}_{fname}"
+        )
+
+        rgb_paths_dict[
+            unique_name
+        ] = os.path.join(
+            rgb_folder,
+            fname
+        )
+
+        sar_paths_dict[
+            unique_name
+        ] = os.path.join(
+            sar_folder,
+            fname
+        )
+
+common_files = sorted(
+    rgb_paths_dict.keys()
 )
 
 print(
-    f"Total Paired Images: {len(common_files)}"
+    f"\nTotal Paired Images: {len(common_files)}"
 )
 
 # =========================
-# EMBEDDING STORAGE
+# STORAGE
 # =========================
 
 rgb_embeddings = []
@@ -84,15 +141,13 @@ for i, filename in enumerate(common_files):
 
     try:
 
-        rgb_path = os.path.join(
-            rgb_folder,
+        rgb_path = rgb_paths_dict[
             filename
-        )
+        ]
 
-        sar_path = os.path.join(
-            sar_folder,
+        sar_path = sar_paths_dict[
             filename
-        )
+        ]
 
         rgb_img = Image.open(
             rgb_path
@@ -206,10 +261,10 @@ np.save(
 )
 
 # =========================
-# FINAL REPORT
+# REPORT
 # =========================
 
-print("\nDone!")
+print("\n===== DONE =====")
 
 print(
     "RGB Shape:",

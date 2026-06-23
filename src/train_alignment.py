@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from sklearn.model_selection import train_test_split
+from torch.utils.data import TensorDataset, DataLoader
 
 # ==========================
 # LOAD EMBEDDINGS
@@ -22,6 +23,22 @@ sar = np.load(
 ).astype(np.float32)
 
 print("Total Pairs:", len(rgb))
+
+# ==========================
+# NORMALIZE INPUT EMBEDDINGS
+# ==========================
+
+rgb = rgb / np.linalg.norm(
+    rgb,
+    axis=1,
+    keepdims=True
+)
+
+sar = sar / np.linalg.norm(
+    sar,
+    axis=1,
+    keepdims=True
+)
 
 # ==========================
 # TRAIN / TEST SPLIT
@@ -68,6 +85,31 @@ device = (
 print("Device:", device)
 
 # ==========================
+# DATASET
+# ==========================
+
+rgb_tensor = torch.tensor(
+    rgb_train,
+    dtype=torch.float32
+)
+
+sar_tensor = torch.tensor(
+    sar_train,
+    dtype=torch.float32
+)
+
+dataset = TensorDataset(
+    rgb_tensor,
+    sar_tensor
+)
+
+loader = DataLoader(
+    dataset,
+    batch_size=256,
+    shuffle=True
+)
+
+# ==========================
 # MODEL
 # ==========================
 
@@ -79,10 +121,18 @@ class ProjectionHead(nn.Module):
 
         self.net = nn.Sequential(
 
-            nn.Linear(512, 1024),
+            nn.Linear(512, 2048),
+            nn.BatchNorm1d(2048),
             nn.ReLU(),
+            nn.Dropout(0.3),
 
-            nn.Linear(1024, 512)
+            nn.Linear(2048, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512)
 
         )
 
@@ -90,39 +140,46 @@ class ProjectionHead(nn.Module):
 
         x = self.net(x)
 
-        x = F.normalize(
+        return F.normalize(
             x,
             dim=1
         )
 
-        return x
-
-model = ProjectionHead().to(device)
+rgb_model = ProjectionHead().to(device)
+sar_model = ProjectionHead().to(device)
 
 # ==========================
-# TRAIN DATA
+# LEARNABLE TEMPERATURE
 # ==========================
 
-rgb_tensor = torch.tensor(
-    rgb_train,
-    dtype=torch.float32
-).to(device)
-
-sar_tensor = torch.tensor(
-    sar_train,
-    dtype=torch.float32
-).to(device)
+logit_scale = nn.Parameter(
+    torch.tensor(
+        np.log(1 / 0.07),
+        dtype=torch.float32,
+        device=device
+    )
+)
 
 # ==========================
 # OPTIMIZER
 # ==========================
 
-optimizer = optim.Adam(
-    model.parameters(),
-    lr=1e-4
+optimizer = optim.AdamW(
+    list(rgb_model.parameters()) +
+    list(sar_model.parameters()) +
+    [logit_scale],
+    lr=1e-4,
+    weight_decay=1e-4
 )
 
-epochs = 200
+epochs = 100
+
+scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=epochs
+)
+
+best_loss = 999999
 
 print("\nTraining Started...\n")
 
@@ -132,59 +189,81 @@ print("\nTraining Started...\n")
 
 for epoch in range(epochs):
 
-    model.train()
+    rgb_model.train()
+    sar_model.train()
 
-    optimizer.zero_grad()
+    epoch_loss = 0.0
 
-    rgb_proj = model(
-        rgb_tensor
-    )
+    for rgb_batch, sar_batch in loader:
 
-    sar_proj = F.normalize(
-        sar_tensor,
-        dim=1
-    )
+        rgb_batch = rgb_batch.to(device)
+        sar_batch = sar_batch.to(device)
 
-    logits = (
-        rgb_proj @ sar_proj.T
-    ) / 0.07
+        optimizer.zero_grad()
 
-    labels = torch.arange(
-        len(rgb_proj)
-    ).to(device)
+        rgb_proj = rgb_model(rgb_batch)
+        sar_proj = sar_model(sar_batch)
 
-    loss_rgb = F.cross_entropy(
-        logits,
-        labels
-    )
+        scale = logit_scale.exp()
 
-    loss_sar = F.cross_entropy(
-        logits.T,
-        labels
-    )
-
-    loss = (
-        loss_rgb + loss_sar
-    ) / 2
-
-    loss.backward()
-
-    optimizer.step()
-
-    if (epoch + 1) % 10 == 0:
-
-        print(
-            f"Epoch {epoch+1}/{epochs} "
-            f"Loss = {loss.item():.4f}"
+        logits = scale * (
+            rgb_proj @ sar_proj.T
         )
 
-# ==========================
-# SAVE MODEL
-# ==========================
+        labels = torch.arange(
+            len(rgb_proj),
+            device=device
+        )
 
-torch.save(
-    model.state_dict(),
-    "remoteclip_test/contrastive_model.pth"
-)
+        loss_rgb = F.cross_entropy(
+            logits,
+            labels
+        )
 
-print("\nModel Saved!")
+        loss_sar = F.cross_entropy(
+            logits.T,
+            labels
+        )
+
+        loss = (
+            loss_rgb + loss_sar
+        ) / 2
+
+        loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            list(rgb_model.parameters()) +
+            list(sar_model.parameters()),
+            max_norm=1.0
+        )
+
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    scheduler.step()
+
+    avg_loss = epoch_loss / len(loader)
+
+    if avg_loss < best_loss:
+
+        best_loss = avg_loss
+
+        torch.save(
+            rgb_model.state_dict(),
+            "remoteclip_test/rgb_model.pth"
+        )
+
+        torch.save(
+            sar_model.state_dict(),
+            "remoteclip_test/sar_model.pth"
+        )
+
+    print(
+        f"Epoch {epoch+1}/{epochs} "
+        f"Loss = {avg_loss:.4f}"
+    )
+
+print("\nTraining Complete!")
+print("Best Loss:", best_loss)
+print("Models Saved!")
